@@ -1,0 +1,81 @@
+name: release-build-wheels
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-wheels:
+    runs-on: [self-hosted, p-dev-ws2040-03]
+
+    env:
+      PY_LIST: "/opt/python/cp38-cp38/bin/python /opt/python/cp39-cp39/bin/python /opt/python/cp310-cp310/bin/python /opt/python/cp311-cp311/bin/python /opt/python/cp312-cp312/bin/python /opt/python/cp313-cp313/bin/python /opt/python/cp314-cp314/bin/python"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Pull manylinux2_28 image
+        run: docker pull quay.io/pypa/manylinux_2_28_x86_64
+
+      - name: Start manylinux builder container
+        run: |
+          mkdir -p ${{ runner.temp }}/wheelhouse
+          container=$(docker run -td \
+            --name "flaggems_builder" \
+            -v ${{ github.workspace }}:/workspace \
+            -v ${{ runner.temp }}/wheelhouse:/wheelhouse \
+            -w /workspace \
+            quay.io/pypa/manylinux_2_28_x86_64)
+          echo "CONTAINER=$container" >> $GITHUB_ENV
+
+      - name: Install build tools inside container
+        run: |
+          docker exec -t $CONTAINER bash -c "
+            set -e
+            for PY in $PY_LIST; do
+              \"\$PY\" -m pip install --upgrade pip setuptools wheel build -i https://pypi.tuna.tsinghua.edu.cn/simple
+            done
+          "
+
+      - name: Build wheels for Python versions
+        run: |
+          docker exec -t $CONTAINER bash -c "
+            set -e
+            for PY in $PY_LIST; do
+              \"\$PY\" -m build --wheel --outdir /wheelhouse
+            done
+          "
+
+      - name: Upload wheels as artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: built-wheels
+          path: ${{ runner.temp }}/wheelhouse/*.whl
+
+      - name: Cleanup container
+        if: always()
+        run: docker rm -f $CONTAINER
+
+  publish:
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    environment: pypi      # 你在 PyPI 上配置的 Trusted Publisher
+    permissions:
+      id-token: write       # 允许生成 OIDC token
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Download built wheels
+        uses: actions/download-artifact@v5
+        with:
+          name: built-wheels
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__       # 必须写 __token__，不需要真实 API token
+          password: ${{secrets.PYPI_API_TOKEN}} # 可以省略，如果配置了 Trusted Publisher
