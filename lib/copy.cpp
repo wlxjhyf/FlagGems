@@ -85,13 +85,21 @@ at::Tensor to_copy(const at::Tensor& x,
                    bool non_blocking = false,
                    c10::optional<at::MemoryFormat> memory_format = c10::nullopt) {
   TORCH_WARN("[flag_gems][to_copy] gems::to_copy");
-  TORCH_CHECK(x.layout() == at::Layout::Strided, "Only strided tensors are supported");
-  TORCH_CHECK(!x.is_quantized(), "Quantized tensors are not supported");
-  if (layout.has_value()) {
-    TORCH_CHECK(layout.value() == x.layout(), "to_copy: layout conversion is not supported");
+  if (x.layout() != at::Layout::Strided || x.is_quantized() || pin_memory.has_value() || non_blocking) {
+    return redispatch_to_copy_fallback(x, dtype, layout, device, pin_memory, non_blocking, memory_format);
   }
-  TORCH_CHECK(!pin_memory.has_value(), "to_copy: pin_memory is not supported");
-  TORCH_CHECK(!non_blocking, "to_copy: non_blocking copy is not supported");
+  if (layout.has_value()) {
+    if (layout.value() != x.layout()) {
+      return redispatch_to_copy_fallback(x, dtype, layout, device, pin_memory, non_blocking, memory_format);
+    }
+  }
+  // TORCH_CHECK(x.layout() == at::Layout::Strided, "Only strided tensors are supported");
+  // TORCH_CHECK(!x.is_quantized(), "Quantized tensors are not supported");
+  // if (layout.has_value()) {
+  //   TORCH_CHECK(layout.value() == x.layout(), "to_copy: layout conversion is not supported");
+  // }
+  // TORCH_CHECK(!pin_memory.has_value(), "to_copy: pin_memory is not supported");
+  // TORCH_CHECK(!non_blocking, "to_copy: non_blocking copy is not supported");
 
   auto target_dtype = dtype.has_value() ? dtype.value() : x.scalar_type();
   auto target_device = device.has_value() ? device.value() : x.device();
@@ -99,6 +107,10 @@ at::Tensor to_copy(const at::Tensor& x,
 
   at::Tensor out =
       at::empty_like(x, x.options().dtype(target_dtype).device(target_device), target_memory_format);
+
+  if (x.scalar_type() != target_dtype || !_can_use_triton_copy(out, x, non_blocking)) {
+    return redispatch_to_copy_fallback(x, dtype, layout, device, pin_memory, non_blocking, memory_format);
+  }
 
   // if (!_can_use_triton_copy(out, x, non_blocking)) {
   //   return redispatch_to_copy_fallback(x, dtype, layout, device, pin_memory, non_blocking, memory_format);
@@ -116,9 +128,7 @@ at::Tensor to_copy(const at::Tensor& x,
 
   // at::Tensor x_linear = (x.scalar_type() != target_dtype) ? x.to(target_dtype) : x;
   at::Tensor x_linear = x;
-  if (x.scalar_type() != target_dtype) {
-    return redispatch_to_copy_fallback(x, dtype, layout, device, pin_memory, non_blocking, memory_format);
-  }
+
   if (x_linear.is_contiguous() && out.is_contiguous() && numel <= std::numeric_limits<int32_t>::max()) {
     const TritonJITFunction& kernel_linear =
         TritonJITFunction::get_instance((utils::get_triton_src_path() / "copy.py").string(),
