@@ -36,7 +36,7 @@ std::vector<int64_t> broadcasted_stride(const std::vector<int64_t>& shape,
   return out_stride;
 }
 
-static bool _can_use_triton_copy(const at::Tensor& dst, const at::Tensor& src, bool non_blocking) {
+static bool _can_use_triton(const at::Tensor& dst, const at::Tensor& src, bool non_blocking) {
   if (!dst.is_cuda() || !src.is_cuda()) return false;
   if (dst.device() != src.device()) return false;
   if (non_blocking) return false;
@@ -84,22 +84,12 @@ at::Tensor to_copy(const at::Tensor& x,
                    c10::optional<bool> pin_memory = c10::nullopt,
                    bool non_blocking = false,
                    c10::optional<at::MemoryFormat> memory_format = c10::nullopt) {
-  TORCH_WARN("[flag_gems][to_copy] gems::to_copy");
-  if (x.layout() != at::Layout::Strided || x.is_quantized() || pin_memory.has_value() || non_blocking) {
+  const bool unsupported = x.layout() != at::Layout::Strided || x.is_quantized() || pin_memory.has_value() ||
+                           non_blocking || (layout.has_value() && layout.value() != x.layout());
+
+  if (unsupported) {
     return redispatch_to_copy_fallback(x, dtype, layout, device, pin_memory, non_blocking, memory_format);
   }
-  if (layout.has_value()) {
-    if (layout.value() != x.layout()) {
-      return redispatch_to_copy_fallback(x, dtype, layout, device, pin_memory, non_blocking, memory_format);
-    }
-  }
-  // TORCH_CHECK(x.layout() == at::Layout::Strided, "Only strided tensors are supported");
-  // TORCH_CHECK(!x.is_quantized(), "Quantized tensors are not supported");
-  // if (layout.has_value()) {
-  //   TORCH_CHECK(layout.value() == x.layout(), "to_copy: layout conversion is not supported");
-  // }
-  // TORCH_CHECK(!pin_memory.has_value(), "to_copy: pin_memory is not supported");
-  // TORCH_CHECK(!non_blocking, "to_copy: non_blocking copy is not supported");
 
   auto target_dtype = dtype.has_value() ? dtype.value() : x.scalar_type();
   auto target_device = device.has_value() ? device.value() : x.device();
@@ -108,13 +98,9 @@ at::Tensor to_copy(const at::Tensor& x,
   at::Tensor out =
       at::empty_like(x, x.options().dtype(target_dtype).device(target_device), target_memory_format);
 
-  if (x.scalar_type() != target_dtype || !_can_use_triton_copy(out, x, non_blocking)) {
+  if (x.scalar_type() != target_dtype || !_can_use_triton(out, x, non_blocking)) {
     return redispatch_to_copy_fallback(x, dtype, layout, device, pin_memory, non_blocking, memory_format);
   }
-
-  // if (!_can_use_triton_copy(out, x, non_blocking)) {
-  //   return redispatch_to_copy_fallback(x, dtype, layout, device, pin_memory, non_blocking, memory_format);
-  // }
 
   const int64_t numel = x.numel();
   if (numel == 0) return out;
@@ -126,14 +112,11 @@ at::Tensor to_copy(const at::Tensor& x,
   c10::cuda::CUDAStream stream = c10::cuda::getCurrentCUDAStream();
   CUstream raw_stream = static_cast<CUstream>(stream.stream());
 
-  // at::Tensor x_linear = (x.scalar_type() != target_dtype) ? x.to(target_dtype) : x;
-  at::Tensor x_linear = x;
-
-  if (x_linear.is_contiguous() && out.is_contiguous() && numel <= std::numeric_limits<int32_t>::max()) {
+  if (x.is_contiguous() && out.is_contiguous() && numel <= std::numeric_limits<int32_t>::max()) {
     const TritonJITFunction& kernel_linear =
         TritonJITFunction::get_instance((utils::get_triton_src_path() / "copy.py").string(),
                                         "copy_kernel_linear");
-    kernel_linear(raw_stream, grid_x, 1, 1, 4, 0, x_linear, out, numel, BLOCK_SIZE);
+    kernel_linear(raw_stream, grid_x, 1, 1, 4, 0, x, out, numel, BLOCK_SIZE);
     return out;
   }
 
@@ -141,8 +124,8 @@ at::Tensor to_copy(const at::Tensor& x,
   int NDIMS = task_shape.size();
 
   std::vector<int64_t> src_stride =
-      broadcasted_stride(std::vector<int64_t>(x_linear.sizes().begin(), x_linear.sizes().end()),
-                         std::vector<int64_t>(x_linear.strides().begin(), x_linear.strides().end()),
+      broadcasted_stride(std::vector<int64_t>(x.sizes().begin(), x.sizes().end()),
+                         std::vector<int64_t>(x.strides().begin(), x.strides().end()),
                          task_shape);
   std::vector<int64_t> dst_stride =
       broadcasted_stride(std::vector<int64_t>(out.sizes().begin(), out.sizes().end()),
@@ -157,7 +140,7 @@ at::Tensor to_copy(const at::Tensor& x,
             1,
             4,
             0,
-            x_linear,
+            x,
             out,
             torch::tensor(task_shape, torch::TensorOptions().dtype(torch::kInt64).device(out.device())),
             torch::tensor(src_stride, torch::TensorOptions().dtype(torch::kInt64).device(out.device())),
@@ -170,11 +153,11 @@ at::Tensor to_copy(const at::Tensor& x,
 }
 
 at::Tensor& copy_(at::Tensor& dst, const at::Tensor& src, bool non_blocking = false) {
-  TORCH_WARN("[flag_gems][copy_] gems::copy_");
-  if (!_can_use_triton_copy(dst, src, non_blocking)) {
+  if (!_can_use_triton(dst, src, non_blocking)) {
     return redispatch_copy_fallback(dst, src, non_blocking);
   }
   TORCH_CHECK(!dst._is_zerotensor(), "ZeroTensors are immutable");
+
   if (src._is_zerotensor()) {
     dst.zero_();
     return dst;
