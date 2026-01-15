@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <tuple>
 #include <vector>
+#include "flag_gems/accuracy_utils.h"
 #include "flag_gems/operators.h"
 #include "torch/torch.h"
 
@@ -36,7 +37,7 @@ TEST_P(NormOpTest, rms_norm) {
   };
   torch::Tensor out_torch = compute_ref(input, weight, eps);
   torch::Tensor out_triton = flag_gems::rms_norm(input, weight, eps);
-  EXPECT_TRUE(torch::allclose(out_torch, out_triton, /*rtol=*/1e-2, /*atol=*/1e-3));
+  flag_gems::accuracy_utils::gems_assert_close(out_triton, out_torch);
 }
 TEST_P(NormOpTest, fused_add_rms_norm) {
   torch::manual_seed(0);
@@ -72,7 +73,7 @@ TEST_P(NormOpTest, fused_add_rms_norm) {
   torch::Tensor out_torch = compute_ref(input, residual, weight, eps);
   flag_gems::fused_add_rms_norm(input, residual, weight, eps);
   torch::Tensor out_triton = input;  // The input tensor is modified in-place
-  EXPECT_TRUE(torch::allclose(out_torch, out_triton, /*rtol=*/1e-2, /*atol=*/1e-3));
+  flag_gems::accuracy_utils::gems_assert_close(out_triton, out_torch);
 }
 // Instantiate with combinations of dtypes, input shapes and weight shapes
 INSTANTIATE_TEST_SUITE_P(

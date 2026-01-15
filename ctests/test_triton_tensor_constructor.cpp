@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "flag_gems/accuracy_utils.h"
 #include "flag_gems/operators.h"
 #include "torch/torch.h"
 
@@ -34,11 +35,11 @@ TEST(zeros_op_test, 2d_tensor) {
   );
 
   EXPECT_TRUE(torch::all(out_triton == 0).item<bool>());
-  EXPECT_TRUE(torch::allclose(out_triton, ref_empty));
+  flag_gems::accuracy_utils::gems_assert_equal(out_triton, ref_empty);
 
   EXPECT_TRUE(torch::all(out_triton_0 == 0).item<bool>());
-  EXPECT_TRUE(torch::allclose(out_triton_0, ref_empty_0));
+  flag_gems::accuracy_utils::gems_assert_equal(out_triton_0, ref_empty_0);
 
   EXPECT_TRUE(torch::all(out_triton_1 == 0).item<bool>());
-  EXPECT_TRUE(torch::allclose(out_triton_1, ref_empty_1));
+  flag_gems::accuracy_utils::gems_assert_equal(out_triton_1, ref_empty_1);
 }
